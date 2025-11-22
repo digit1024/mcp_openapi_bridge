@@ -112,18 +112,18 @@ impl OpenApiServer {
 
             for param in &op.parameters {
                 if let ReferenceOr::Item(param) = param {
-                    let param_data = match param {
-                        Parameter::Query { parameter_data, .. } => parameter_data,
-                        Parameter::Path { parameter_data, .. } => {
-                            required.push(parameter_data.name.clone());
-                            parameter_data
-                        }
-                        Parameter::Header { parameter_data, .. } => parameter_data,
-                        Parameter::Cookie { parameter_data, .. } => parameter_data,
+                    let (param_data, is_path_param) = match param {
+                        Parameter::Query { parameter_data, .. } => (parameter_data, false),
+                        Parameter::Path { parameter_data, .. } => (parameter_data, true),
+                        Parameter::Header { parameter_data, .. } => (parameter_data, false),
+                        Parameter::Cookie { parameter_data, .. } => (parameter_data, false),
                     };
 
-                    if param_data.required {
-                        required.push(param_data.name.clone());
+                    // Add to required list if it's a path param or explicitly marked as required
+                    if is_path_param || param_data.required {
+                        if !required.contains(&param_data.name) {
+                            required.push(param_data.name.clone());
+                        }
                     }
 
                     // Extract schema from parameter
@@ -191,10 +191,10 @@ impl OpenApiServer {
         }
 
         let method = parts[0].to_uppercase();
-        let path_part = parts[1].replace('_', "/");
+        let path_part = parts[1]; // Keep underscores for matching
 
         // Find matching path in OpenAPI spec
-        let (path, operation) = self.find_operation(&method, &path_part)?;
+        let (path, operation) = self.find_operation(&method, path_part)?;
 
         // Build the request URL
         let mut url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
@@ -340,10 +340,16 @@ impl ServerHandler for OpenApiServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         info!("📋 Client requested tools list");
-        Ok(ListToolsResult {
+        let tools_count = self.tools.len();
+        info!("📊 Returning {} tools", tools_count);
+        
+        let result = ListToolsResult {
             tools: self.tools.as_ref().clone(),
             next_cursor: None,
-        })
+        };
+        
+        info!("✅ Tools list prepared successfully");
+        Ok(result)
     }
 
     async fn call_tool(

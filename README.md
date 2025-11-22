@@ -130,18 +130,49 @@ The server generates this MCP tool:
 
 ## 🧪 Testing
 
-You can test the server using any MCP client. The server communicates via stdin/stdout using the JSON-RPC protocol.
+### Run the E2E Test
+
+Make sure your API is running on `localhost:5000`, then:
+
+```bash
+python3 test.py
+```
+
+This will:
+- ✅ Start the MCP server
+- ✅ Initialize the MCP session (with proper handshake)
+- ✅ List all available tools from your OpenAPI spec
+- ✅ Find meal-related tools
+- ✅ Call tools to get meals from yesterday
+- ✅ Display results with pretty formatting
+
+### Test with Different API
+
+Edit the URLs at the top of `test.py`:
+
+```python
+BASE_URL = "http://your-api.com/v1"
+DOC_URL = "http://your-api.com/openapi.json"
+```
 
 ### Manual Testing
 
-Send JSON-RPC messages to stdin:
+Start the server manually:
 
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+```bash
+BASE_URL="http://localhost:5000/api/v1" \
+DOC_URL="http://localhost:5000/api-docs.json" \
+RUST_LOG="info" \
+./target/release/mcp-openapi-transformer
 ```
 
+Then send JSON-RPC messages via stdin:
+
 ```json
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_users_id","arguments":{"id":"123"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_meals","arguments":{"date":"2025-11-21"}}}
 ```
 
 ## 🔍 Logging
