@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use openapiv3::{OpenAPI, Operation, Parameter, ParameterSchemaOrContent, ReferenceOr};
+use openapiv3::{OpenAPI, Operation, Parameter, ParameterSchemaOrContent, ReferenceOr, SchemaKind, Type};
 use reqwest::Method;
 use rmcp::{
     model::*,
@@ -72,11 +72,11 @@ impl OpenApiServer {
             };
 
             // Process each HTTP method
-            Self::process_operation_static(path, &path_item.get, "GET", &mut tools);
-            Self::process_operation_static(path, &path_item.post, "POST", &mut tools);
-            Self::process_operation_static(path, &path_item.put, "PUT", &mut tools);
-            Self::process_operation_static(path, &path_item.delete, "DELETE", &mut tools);
-            Self::process_operation_static(path, &path_item.patch, "PATCH", &mut tools);
+            Self::process_operation_static(spec, path, &path_item.get, "GET", &mut tools);
+            Self::process_operation_static(spec, path, &path_item.post, "POST", &mut tools);
+            Self::process_operation_static(spec, path, &path_item.put, "PUT", &mut tools);
+            Self::process_operation_static(spec, path, &path_item.delete, "DELETE", &mut tools);
+            Self::process_operation_static(spec, path, &path_item.patch, "PATCH", &mut tools);
         }
 
         tools
@@ -84,6 +84,7 @@ impl OpenApiServer {
 
     /// Process a single operation and add it as a tool
     fn process_operation_static(
+        spec: &OpenAPI,
         path: &str,
         operation: &Option<Operation>,
         method: &str,
@@ -148,16 +149,89 @@ impl OpenApiServer {
                 }
             }
 
-            // Add request body as a parameter if present
+            // Flatten request body properties directly into parameters
             if let Some(request_body) = &op.request_body {
                 if let ReferenceOr::Item(body) = request_body {
-                    properties.insert(
-                        "body".to_string(),
-                        json!({
-                            "type": "object",
-                            "description": body.description.as_deref().unwrap_or("Request body")
-                        }),
-                    );
+                    // Try to extract schema from application/json content
+                    if let Some(content) = body.content.get("application/json") {
+                        if let Some(media_schema) = &content.schema {
+                            // Resolve schema (handle both inline and references)
+                            let resolved_schema = match media_schema {
+                                ReferenceOr::Item(schema) => Some(schema),
+                                ReferenceOr::Reference { reference } => {
+                                    // Extract schema name from reference like "#/components/schemas/Pet"
+                                    if let Some(schema_name) = reference.strip_prefix("#/components/schemas/") {
+                                        spec.components.as_ref()
+                                            .and_then(|c| c.schemas.get(schema_name))
+                                            .and_then(|s| match s {
+                                                ReferenceOr::Item(schema) => Some(schema),
+                                                _ => None,
+                                            })
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            
+                            if let Some(schema) = resolved_schema {
+                                // Extract properties from the schema
+                                if let SchemaKind::Type(Type::Object(obj_type)) = &schema.schema_kind {
+                                    for (prop_name, prop_schema_ref) in &obj_type.properties {
+                                        // Convert the property schema to JSON
+                                        let prop_json = match prop_schema_ref {
+                                            ReferenceOr::Item(prop_schema) => {
+                                                let mut prop_obj = Map::new();
+                                                
+                                                // Determine the type
+                                                match &prop_schema.schema_kind {
+                                                    SchemaKind::Type(Type::String(_)) => {
+                                                        prop_obj.insert("type".to_string(), json!("string"));
+                                                    }
+                                                    SchemaKind::Type(Type::Number(_)) => {
+                                                        prop_obj.insert("type".to_string(), json!("number"));
+                                                    }
+                                                    SchemaKind::Type(Type::Integer(_)) => {
+                                                        prop_obj.insert("type".to_string(), json!("integer"));
+                                                    }
+                                                    SchemaKind::Type(Type::Boolean(_)) => {
+                                                        prop_obj.insert("type".to_string(), json!("boolean"));
+                                                    }
+                                                    SchemaKind::Type(Type::Array(_)) => {
+                                                        prop_obj.insert("type".to_string(), json!("array"));
+                                                    }
+                                                    SchemaKind::Type(Type::Object(_)) => {
+                                                        prop_obj.insert("type".to_string(), json!("object"));
+                                                    }
+                                                    _ => {
+                                                        prop_obj.insert("type".to_string(), json!("string"));
+                                                    }
+                                                }
+                                                
+                                                // Add description if available
+                                                if let Some(desc) = &prop_schema.schema_data.description {
+                                                    prop_obj.insert("description".to_string(), json!(desc));
+                                                }
+                                                
+                                                json!(prop_obj)
+                                            }
+                                            ReferenceOr::Reference { .. } => {
+                                                json!({"type": "string"})
+                                            }
+                                        };
+                                        
+                                        properties.insert(prop_name.clone(), prop_json);
+                                    }
+                                    
+                                    // Add required properties from the schema
+                                    for req_prop in &obj_type.required {
+                                        if !required.contains(req_prop) {
+                                            required.push(req_prop.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -214,18 +288,39 @@ impl OpenApiServer {
             }
         }
 
+        // Collect all parameter names that are path or query params
+        let mut used_param_names = std::collections::HashSet::new();
+        
         // Build query parameters
         let mut query_params = Vec::new();
         for param in &operation.parameters {
-            if let ReferenceOr::Item(Parameter::Query {
-                parameter_data, ..
-            }) = param
-            {
-                if let Some(value) = args_obj.get(&parameter_data.name) {
-                    query_params.push((
-                        parameter_data.name.clone(),
-                        value.to_string().trim_matches('"').to_string(),
-                    ));
+            if let ReferenceOr::Item(param_item) = param {
+                let param_data = match param_item {
+                    Parameter::Query { parameter_data, .. } => {
+                        used_param_names.insert(parameter_data.name.clone());
+                        Some(parameter_data)
+                    }
+                    Parameter::Path { parameter_data, .. } => {
+                        used_param_names.insert(parameter_data.name.clone());
+                        None
+                    }
+                    Parameter::Header { parameter_data, .. } => {
+                        used_param_names.insert(parameter_data.name.clone());
+                        None
+                    }
+                    Parameter::Cookie { parameter_data, .. } => {
+                        used_param_names.insert(parameter_data.name.clone());
+                        None
+                    }
+                };
+                
+                if let Some(param_data) = param_data {
+                    if let Some(value) = args_obj.get(&param_data.name) {
+                        query_params.push((
+                            param_data.name.clone(),
+                            value.to_string().trim_matches('"').to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -238,9 +333,16 @@ impl OpenApiServer {
             request = request.query(&query_params);
         }
 
-        // Add body if present
-        if let Some(body) = args_obj.get("body") {
-            request = request.json(body);
+        // Build body from remaining parameters (those not used in path/query/header/cookie)
+        let body_params: Map<String, Value> = args_obj
+            .iter()
+            .filter(|(key, _)| !used_param_names.contains(key.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        
+        // Add body if there are any body parameters
+        if !body_params.is_empty() {
+            request = request.json(&body_params);
         }
 
         info!("📡 Sending request to: {}", url);

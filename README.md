@@ -7,7 +7,9 @@ A Model Context Protocol (MCP) server that dynamically exposes REST API endpoint
 - **Dynamic Tool Generation**: Automatically creates MCP tools from OpenAPI spec endpoints
 - **Full OpenAPI Support**: Parses paths, parameters, request bodies, and descriptions
 - **HTTP Method Support**: Handles GET, POST, PUT, DELETE, and PATCH operations
-- **Parameter Handling**: Supports path parameters, query parameters, and request bodies
+- **Flattened Parameters**: Request body properties are flattened into top-level tool parameters for better UX
+- **Schema Reference Resolution**: Handles both inline schemas and `$ref` references to component schemas
+- **Parameter Handling**: Supports path parameters, query parameters, and flattened request body fields
 - **Error Handling**: Comprehensive error reporting for API calls
 
 ## 🏗️ Architecture
@@ -128,7 +130,64 @@ The server generates this MCP tool:
   }
   ```
 
+## 🎯 Parameter Flattening
+
+Request body parameters are **automatically flattened** into top-level tool parameters for a better user experience.
+
+### Before (Wrapped)
+```json
+{
+  "properties": {
+    "body": {
+      "type": "object",
+      "description": "Request body"
+    }
+  }
+}
+```
+
+### After (Flattened) ✅
+```json
+{
+  "properties": {
+    "name": { "type": "string" },
+    "photoUrls": { "type": "array" },
+    "status": { "type": "string" },
+    "category": { "type": "string" }
+  },
+  "required": ["name", "photoUrls"]
+}
+```
+
+### Benefits
+- ✨ Clear visibility of required fields
+- ✨ Type information for each parameter
+- ✨ Better IDE autocomplete support
+- ✨ Improved validation and documentation
+
+The server automatically:
+1. Resolves schema references (`$ref: "#/components/schemas/..."`)
+2. Extracts all properties from the request body schema
+3. Adds them as individual parameters with proper types
+4. Marks required fields appropriately
+5. Reconstructs the request body automatically during execution
+
 ## 🧪 Testing
+
+### Run Parameter Flattening Test
+
+Test with the public Petstore API:
+
+```bash
+python3 test_flattening.py
+```
+
+This will:
+- ✅ Connect to Petstore API
+- ✅ Verify no `body` parameters in POST endpoints
+- ✅ Confirm parameters are properly flattened
+- ✅ Test real API calls with flattened parameters
+- ✅ Display detailed test results
 
 ### Run the E2E Test
 
