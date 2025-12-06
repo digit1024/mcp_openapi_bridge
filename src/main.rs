@@ -448,6 +448,7 @@ impl ServerHandler for OpenApiServer {
         let result = ListToolsResult {
             tools: self.tools.as_ref().clone(),
             next_cursor: None,
+            meta: None,
         };
         
         info!("✅ Tools list prepared successfully");
