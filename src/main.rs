@@ -30,7 +30,20 @@ impl OpenApiServer {
     async fn new(base_url: String, doc_url: String) -> Result<Self> {
         info!("🔍 Fetching OpenAPI spec from: {}", doc_url);
 
-        let http_client = reqwest::Client::new();
+        // Check if we should ignore invalid certificates (for self-signed/local certs)
+        let insecure = env::var("INSECURE")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false);
+
+        let http_client = if insecure {
+            info!("⚠️  INSECURE mode: Accepting invalid/self-signed certificates");
+            reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .context("Failed to build HTTP client")?
+        } else {
+            reqwest::Client::new()
+        };
         let spec_text = http_client
             .get(&doc_url)
             .send()
