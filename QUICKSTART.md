@@ -47,6 +47,18 @@ DOC_URL="http://your-api/openapi.json" \
 python3 test_e2e.py
 ```
 
+### API keys / custom headers
+
+Any env var `HEADER_<name>=<value>` is sent on every HTTP request. Underscores in `<name>` become hyphens (`HEADER_X_API_KEY` → `X-API-Key`).
+
+```bash
+# dietapp (Authorization: ApiKey dk_…)
+HEADER_AUTHORIZATION="ApiKey dk_your_key" \
+BASE_URL="http://localhost:5000/api/v1" \
+DOC_URL="http://localhost:5000/api-docs.json" \
+./target/release/mcp-openapi-transformer
+```
+
 ---
 
 ## Manual Testing

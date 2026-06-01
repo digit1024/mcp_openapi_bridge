@@ -50,6 +50,27 @@ The server requires two environment variables:
 - **`BASE_URL`**: The base URL of the API to call (e.g., `https://api.example.com`)
 - **`DOC_URL`**: The URL to the OpenAPI specification JSON (e.g., `https://api.example.com/openapi.json`)
 
+Optional:
+
+- **`HEADER_<name>`**: Custom HTTP header on every request (spec fetch + tool calls). Underscores in `<name>` become hyphens.
+- **`INSECURE`**: Set to `true` or `1` to accept invalid TLS certificates.
+
+Example (dietapp with API key auth):
+
+```bash
+HEADER_AUTHORIZATION="ApiKey dk_your_secret_here" \
+BASE_URL="http://localhost:5000/api/v1" \
+DOC_URL="http://localhost:5000/api-docs.json" \
+./target/release/mcp-openapi-transformer
+```
+
+Alternative header style:
+
+```bash
+HEADER_X_API_KEY="dk_your_secret_here" \
+...
+```
+
 ## 🚀 Usage
 
 ### Building
@@ -258,8 +279,7 @@ Levels: `trace`, `debug`, `info`, `warn`, `error`
 
 Contributions are welcome! This is a starting point that can be extended with:
 
-- [ ] Support for authentication (API keys, OAuth, etc.)
-- [ ] Custom headers configuration
+- [ ] Support for authentication (API keys, OAuth, etc.) beyond env headers
 - [ ] Response schema validation
 - [ ] OpenAPI v2 (Swagger) support
 - [ ] File upload/download support
@@ -275,7 +295,7 @@ MIT License - feel free to use and modify!
 - Currently only supports OpenAPI v3.x specifications in JSON format
 - Reference resolution (`$ref`) is limited
 - Complex parameter schemas are simplified to basic types
-- No authentication support yet (add headers manually if needed)
+- Auth via `HEADER_*` env vars only (no OpenAPI `securitySchemes` auto-mapping yet)
 
 ---
 

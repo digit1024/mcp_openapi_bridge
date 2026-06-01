@@ -9,10 +9,13 @@ use rmcp::{
 };
 use serde_json::{json, Map, Value};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const HEADER_ENV_PREFIX: &str = "HEADER_";
 
 /// Main application state containing configuration and OpenAPI spec
 #[derive(Clone)]
@@ -25,25 +28,57 @@ struct OpenApiServer {
     tools: Arc<Vec<Tool>>,
 }
 
+/// Load custom HTTP headers from env vars named `HEADER_<name>=<value>`.
+/// Underscores in `<name>` become hyphens (e.g. `HEADER_X_API_KEY` → `X-API-Key`).
+fn load_headers_from_env() -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    for (key, value) in env::vars() {
+        let Some(suffix) = key.strip_prefix(HEADER_ENV_PREFIX) else {
+            continue;
+        };
+        if suffix.is_empty() {
+            warn!("Ignoring empty header env var: {}", key);
+            continue;
+        }
+        if value.is_empty() {
+            warn!("Ignoring empty header value for: {}", key);
+            continue;
+        }
+        let header_name = suffix.replace('_', "-");
+        info!("🔑 Custom header configured: {}", header_name);
+        headers.insert(header_name, value);
+    }
+    headers
+}
+
+fn build_http_client(insecure: bool, default_headers: &HashMap<String, String>) -> Result<reqwest::Client> {
+    let mut header_map = reqwest::header::HeaderMap::new();
+    for (name, value) in default_headers {
+        let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("Invalid header name from env HEADER_*: {}", name))?;
+        let header_value = reqwest::header::HeaderValue::from_str(value)
+            .with_context(|| format!("Invalid header value for {}", name))?;
+        header_map.insert(header_name, header_value);
+    }
+
+    let mut builder = reqwest::Client::builder().default_headers(header_map);
+    if insecure {
+        info!("⚠️  INSECURE mode: Accepting invalid/self-signed certificates");
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().context("Failed to build HTTP client")
+}
+
 impl OpenApiServer {
     /// Fetch and parse OpenAPI specification from the doc_url
-    async fn new(base_url: String, doc_url: String) -> Result<Self> {
+    async fn new(base_url: String, doc_url: String, default_headers: HashMap<String, String>) -> Result<Self> {
         info!("🔍 Fetching OpenAPI spec from: {}", doc_url);
 
-        // Check if we should ignore invalid certificates (for self-signed/local certs)
         let insecure = env::var("INSECURE")
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false);
 
-        let http_client = if insecure {
-            info!("⚠️  INSECURE mode: Accepting invalid/self-signed certificates");
-            reqwest::Client::builder()
-                .danger_accept_invalid_certs(true)
-                .build()
-                .context("Failed to build HTTP client")?
-        } else {
-            reqwest::Client::new()
-        };
+        let http_client = build_http_client(insecure, &default_headers)?;
         let spec_text = http_client
             .get(&doc_url)
             .send()
@@ -304,14 +339,15 @@ impl OpenApiServer {
         // Collect all parameter names that are path or query params
         let mut used_param_names = std::collections::HashSet::new();
         
-        // Build query parameters
+        // Build query and header parameters from tool arguments
         let mut query_params = Vec::new();
+        let mut request_headers = Vec::new();
         for param in &operation.parameters {
             if let ReferenceOr::Item(param_item) = param {
                 let param_data = match param_item {
                     Parameter::Query { parameter_data, .. } => {
                         used_param_names.insert(parameter_data.name.clone());
-                        Some(parameter_data)
+                        Some(("query", parameter_data))
                     }
                     Parameter::Path { parameter_data, .. } => {
                         used_param_names.insert(parameter_data.name.clone());
@@ -319,20 +355,22 @@ impl OpenApiServer {
                     }
                     Parameter::Header { parameter_data, .. } => {
                         used_param_names.insert(parameter_data.name.clone());
-                        None
+                        Some(("header", parameter_data))
                     }
                     Parameter::Cookie { parameter_data, .. } => {
                         used_param_names.insert(parameter_data.name.clone());
                         None
                     }
                 };
-                
-                if let Some(param_data) = param_data {
+
+                if let Some((kind, param_data)) = param_data {
                     if let Some(value) = args_obj.get(&param_data.name) {
-                        query_params.push((
-                            param_data.name.clone(),
-                            value.to_string().trim_matches('"').to_string(),
-                        ));
+                        let value_str = value.to_string().trim_matches('"').to_string();
+                        match kind {
+                            "query" => query_params.push((param_data.name.clone(), value_str)),
+                            "header" => request_headers.push((param_data.name.clone(), value_str)),
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -344,6 +382,10 @@ impl OpenApiServer {
 
         if !query_params.is_empty() {
             request = request.query(&query_params);
+        }
+
+        for (name, value) in request_headers {
+            request = request.header(name, value);
         }
 
         // Build body from remaining parameters (those not used in path/query/header/cookie)
@@ -500,13 +542,15 @@ impl ServerHandler for OpenApiServer {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // Initialize tracing - CRITICAL: Must write to stderr only!
+    // MCP servers communicate via JSON-RPC over stdout, so any stdout output will break the protocol.
+    // All logging must go to stderr.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()),
         )
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
+        .with_writer(std::io::stderr) // Explicitly use stderr to avoid breaking MCP protocol
+        .with_ansi(false) // Disable ANSI codes for cleaner output
         .init();
 
     info!("🚀 Starting MCP OpenAPI Transformer");
@@ -519,8 +563,13 @@ async fn main() -> Result<()> {
     info!("📍 Base URL: {}", base_url);
     info!("📄 OpenAPI Doc URL: {}", doc_url);
 
+    let default_headers = load_headers_from_env();
+    if default_headers.is_empty() {
+        info!("ℹ️  No custom headers (set HEADER_<name>=<value> env vars to add them)");
+    }
+
     // Initialize app state
-    let server = OpenApiServer::new(base_url, doc_url).await?;
+    let server = OpenApiServer::new(base_url, doc_url, default_headers).await?;
 
     info!("✨ MCP Server ready. Waiting for requests...");
 
